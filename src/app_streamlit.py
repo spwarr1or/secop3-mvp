@@ -13,6 +13,10 @@ from config import DEFAULT_DEPARTMENT, DEFAULT_LIMIT, DEFAULT_MUNICIPALITY, OUTP
 from territories import cities_for_department, departments
 
 
+UI_DEFAULT_LIMIT = min(DEFAULT_LIMIT, 1000)
+UI_MAX_LIMIT = 10000
+RUN_TIMEOUT_SECONDS = 3600
+
 st.set_page_config(page_title="SECOP 3.0", layout="wide")
 st.title("SECOP 3.0")
 
@@ -40,7 +44,25 @@ def run_analysis(departamento: str, municipio: str, limit: int) -> tuple[bool, s
         "--limit",
         str(limit),
     ]
-    completed = subprocess.run(cmd, cwd=Path(__file__).resolve().parents[1], capture_output=True, text=True, timeout=900)
+    try:
+        completed = subprocess.run(
+            cmd,
+            cwd=Path(__file__).resolve().parents[1],
+            capture_output=True,
+            text=True,
+            timeout=RUN_TIMEOUT_SECONDS,
+        )
+    except subprocess.TimeoutExpired as exc:
+        partial = "\n".join(part for part in [exc.stdout, exc.stderr] if part)
+        message = (
+            f"El análisis superó {RUN_TIMEOUT_SECONDS // 60} minutos y fue detenido. "
+            "Para territorios grandes como Bogotá, usa un límite menor desde el dashboard "
+            "o ejecuta el análisis completo por consola con más tiempo disponible.\n\n"
+            f"Comando sugerido para prueba rápida:\n"
+            f"python src/main.py --departamento \"{departamento}\" --municipio \"{municipio}\" --limit 1000"
+        )
+        return False, f"{message}\n\nSalida parcial:\n{partial}".strip()
+
     read_current_run.clear()
     load_data.clear()
     load_expedientes.clear()
@@ -79,7 +101,16 @@ with st.sidebar:
     city_options = cities_for_department(departamento_input)
     default_city_index = city_options.index(DEFAULT_MUNICIPALITY) if DEFAULT_MUNICIPALITY in city_options else 0
     municipio_input = st.selectbox("Ciudad / municipio", city_options, index=default_city_index)
-    limit_input = st.number_input("Límite por dataset", min_value=1, max_value=50000, value=min(DEFAULT_LIMIT, 50000), step=100)
+    limit_input = st.number_input(
+        "Límite por dataset",
+        min_value=100,
+        max_value=UI_MAX_LIMIT,
+        value=UI_DEFAULT_LIMIT,
+        step=100,
+        help="Para ciudades grandes empieza con 1000 o 2000. El análisis completo puede tardar bastante.",
+    )
+    if int(limit_input) >= 5000:
+        st.warning("Límites altos pueden tardar varios minutos en ciudades grandes.")
     if st.button("Descargar y analizar", type="primary"):
         with st.spinner("Descargando datos públicos y generando reportes..."):
             ok, output = run_analysis(departamento_input.strip(), municipio_input.strip(), int(limit_input))
@@ -101,6 +132,7 @@ if df.empty:
     st.warning("No hay datos procesados para el último análisis.")
     st.stop()
 
+df = df.copy()
 df["valor_analisis"] = pd.to_numeric(df.get("valor_analisis", 0), errors="coerce").fillna(0)
 df["score_riesgo"] = pd.to_numeric(df.get("score_riesgo", 0), errors="coerce").fillna(0)
 df["secop"] = df.get("documentos_o_url", pd.Series(dtype=str)).map(linkify)
@@ -162,7 +194,7 @@ with tab_general:
             .sort_values("registros", ascending=False)
             .head(15)
         )
-        st.plotly_chart(px.bar(entity_chart, x="registros", y="entidad", orientation="h", title="Registros por entidad"), use_container_width=True)
+        st.plotly_chart(px.bar(entity_chart, x="registros", y="entidad", orientation="h", title="Registros por entidad"), width="stretch")
 
     with right:
         modality_chart = (
@@ -172,7 +204,7 @@ with tab_general:
             .sort_values("valor_analisis", ascending=False)
             .head(15)
         )
-        st.plotly_chart(px.bar(modality_chart, x="modalidad", y="valor_analisis", title="Valor por modalidad"), use_container_width=True)
+        st.plotly_chart(px.bar(modality_chart, x="modalidad", y="valor_analisis", title="Valor por modalidad"), width="stretch")
 
     for label, column in (("Posibles procesos repetidos", "procesos_repetidos"), ("Posible fraccionamiento", "posible_fraccionamiento")):
         st.subheader(label)
@@ -209,10 +241,10 @@ with tab_expedientes:
             "enlaces_secop", "documentos_faltantes", "recomendacion",
         ]
         st.subheader("Expedientes críticos")
-        st.dataframe(critical[[c for c in expediente_cols if c in critical.columns]], use_container_width=True)
+        st.dataframe(critical[[c for c in expediente_cols if c in critical.columns]], width="stretch")
 
         st.subheader("Expedientes priorizados")
-        st.dataframe(expedientes[[c for c in expediente_cols if c in expedientes.columns]], use_container_width=True)
+        st.dataframe(expedientes[[c for c in expediente_cols if c in expedientes.columns]], width="stretch")
 
         selected = st.selectbox("Ver detalle de expediente", expedientes["expediente_id"].tolist())
         detail = expedientes[expedientes["expediente_id"].eq(selected)].iloc[0]
@@ -222,7 +254,7 @@ with tab_expedientes:
 
         related = filtered[filtered.get("expediente_id", "").eq(selected)]
         st.subheader("Registros relacionados")
-        st.dataframe(related[[c for c in top_cols if c in related.columns]], use_container_width=True)
+        st.dataframe(related[[c for c in top_cols if c in related.columns]], width="stretch")
 
         expedientes_path = Path(run.get("expedientes_excel", ""))
         if expedientes_path.exists():
